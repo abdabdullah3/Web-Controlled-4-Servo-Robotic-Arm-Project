@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SG90 Robotic Arm Controller</title>
+<style>
+:root{font-family:Inter,Segoe UI,Arial,sans-serif;color:#e8eef8;background:#0b1220}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:radial-gradient(circle at 20% 0%,#172844 0,#0b1220 45%);padding:32px 18px}
+main{max-width:1050px;margin:auto}.top{display:flex;justify-content:space-between;align-items:center;gap:16px;margin-bottom:26px}
+h1{font-size:clamp(25px,4vw,36px);margin:0 0 7px}.sub{color:#9aabc2;margin:0}
+.status{border:1px solid #735d2c;border-radius:999px;padding:9px 13px;color:#fbbf24;font-size:13px;white-space:nowrap}
+.status.online{color:#6ee7b7;border-color:#17634f}
+.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}
+.card{background:rgba(20,32,52,.92);border:1px solid #263852;border-radius:20px;padding:20px;box-shadow:0 15px 40px #0003}
+.cardhead{display:flex;justify-content:space-between;align-items:center}.card h2{font-size:17px;margin:0}.number{font-size:12px;color:#90a5c2}
+.dial{width:100%;max-width:330px;display:block;margin:8px auto 0;touch-action:none;user-select:none;cursor:crosshair}
+.track{fill:none;stroke:#344761;stroke-width:13;stroke-linecap:round}
+.progress{fill:none;stroke:#22c55e;stroke-width:13;stroke-linecap:round}
+.tick{stroke:#60738e;stroke-width:2}.knob{fill:#eafff2;stroke:#22c55e;stroke-width:5}
+.centertext{fill:#f4f8ff;font-size:29px;font-weight:700;text-anchor:middle}.degree{fill:#91a5c0;font-size:12px;text-anchor:middle}
+.scale{display:flex;justify-content:space-between;color:#8ea1bb;font-size:12px;margin:-4px 14px 12px}
+input[type=range]{width:100%;accent-color:#22c55e}
+.actions{display:flex;gap:10px;margin-top:24px;flex-wrap:wrap}.btn{border:1px solid #3b506d;background:#17263d;color:#e8eef8;padding:10px 15px;border-radius:10px;cursor:pointer}
+.btn:hover{background:#223653}.note{color:#91a5bb;font-size:13px;line-height:1.55;margin-top:20px}
+.pair-values{display:flex;justify-content:space-between;color:#c5d2e3;font-size:14px;margin:12px 0 0}
+@media(max-width:650px){.grid{grid-template-columns:1fr}.top{align-items:flex-start;flex-direction:column}}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div><h1>SG90 Robotic Arm Controller</h1><p class="sub">Arduino Uno R3 · USB serial · 4 independent servos</p></div>
+    <div id="status" class="status">Checking Arduino…</div>
+  </header>
+  <section class="grid" id="controls"></section>
+  <div class="actions">
+    <button class="btn" id="homeBtn">Reset to start positions</button>
+    <button class="btn" id="refreshBtn">Refresh connection</button>
+  </div>
+  <p class="note">Drag a knob along its D-shaped arc or use its slider. Each motor can be controlled independently; the Paired hands card moves L-Hand 0°→90° while R-Hand moves 90°→0°. Commands are sent after a short pause while you drag, reducing unnecessary serial traffic.</p>
+</main>
+<script>
+const servos = [
+  {name:"Base", min:1, max:180, initial:90},
+  {name:"Shoulder", min:0, max:90, initial:45},
+  {name:"L-Hand", min:0, max:90, initial:0},
+  {name:"R-Hand", min:0, max:90, initial:90, reverse:true}
+];
+const angles = servos.map(servo=>servo.initial);
+const lastSent = [null,null,null,null];
+const sendTimers = [null,null,null,null];
+
+const controls = document.getElementById("controls");
+servos.forEach(({name,min,max,initial,reverse},i)=>{
+  const midpoint=Math.floor((min+max)/2);
+  const scale=reverse?[max,midpoint,min]:[min,midpoint,max];
+  controls.insertAdjacentHTML("beforeend", `
+  <article class="card">
+    <div class="cardhead"><h2>${name}</h2><span class="number">SERVO ${i+1}</span></div>
+    <svg class="dial" viewBox="0 0 300 190" data-index="${i}" role="slider" aria-label="${name} servo angle" aria-valuemin="${min}" aria-valuemax="${max}">
+      <path class="track" d="M 40 150 A 110 110 0 0 1 260 150"/>
+      <path class="progress" id="arc${i}" d=""/>
+      <line class="tick" id="tickMin${i}"/>
+      <line class="tick" id="tickMid${i}"/>
+      <line class="tick" id="tickMax${i}"/>
+      <circle class="knob" id="knob${i}" cx="150" cy="40" r="10"/>
+      <text class="centertext" id="value${i}" x="150" y="128">${angles[i]}°</text>
+      <text class="degree" x="150" y="148">ANGLE</text>
+    </svg>
+    <div class="scale"><span>${scale[0]}°</span><span>${scale[1]}°</span><span>${scale[2]}°</span></div>
+    <input type="range" min="${min}" max="${max}" step="1" value="${angles[i]}" id="range${i}" aria-label="${name} angle slider" ${reverse?"dir=\"rtl\"":""}>
+    <div class="number">Start: ${initial}° · Travel: ${reverse?`${max}° → ${min}°`:`${min}° → ${max}°`}</div>
+  </article>`);
+});
+
+controls.insertAdjacentHTML("beforeend", `
+  <article class="card">
+    <div class="cardhead"><h2>Paired hands</h2><span class="number">SIMULTANEOUS</span></div>
+    <p class="note">Move both hands in opposite directions with one control.</p>
+    <input type="range" min="0" max="90" step="1" value="0" id="pairRange" aria-label="Paired hand angle">
+    <div class="scale"><span>L 0° · R 90°</span><span>L 45° · R 45°</span><span>L 90° · R 0°</span></div>
+    <div class="pair-values"><span id="pairLeftValue">L-Hand: 0°</span><span id="pairRightValue">R-Hand: 90°</span></div>
+  </article>`);
+
+function pointFor(angle){
+  const rad=angle*Math.PI/180;
+  return {x:150-110*Math.cos(rad),y:150-110*Math.sin(rad)};
+}
+// FIX: sweep flag is 1 (same direction as the grey track), so the green arc now
+// follows the track exactly instead of bulging inward.
+function arcPath(i,angle){
+  const minimum=servos[i].min;
+  if(angle<=minimum)return "";
+  const p=pointFor(angle);
+  const start=pointFor(minimum);
+  return `M ${start.x} ${start.y} A 110 110 0 0 1 ${p.x} ${p.y}`;
+}
+function render(i,send=true){
+  const {min,max}=servos[i];
+  const a=angles[i],p=pointFor(a);
+  document.getElementById(`knob${i}`).setAttribute("cx",p.x);
+  document.getElementById(`knob${i}`).setAttribute("cy",p.y);
+  document.getElementById(`value${i}`).textContent=`${a}°`;
+  document.getElementById(`arc${i}`).setAttribute("d",arcPath(i,a));
+  [min,Math.floor((min+max)/2),max].forEach((angle,tickIndex)=>{
+    const tick=pointFor(angle);
+    const tickElement=document.getElementById(`tick${["Min","Mid","Max"][tickIndex]}${i}`);
+    tickElement.setAttribute("x1",tick.x);
+    tickElement.setAttribute("y1",tick.y);
+    tickElement.setAttribute("x2",tick.x+(150-tick.x)*12/110);
+    tickElement.setAttribute("y2",tick.y+(150-tick.y)*12/110);
+  });
+  document.getElementById(`range${i}`).value=a;
+  document.querySelector(`[data-index="${i}"]`).setAttribute("aria-valuenow",a);
+  if(i===2||i===3){
+    document.getElementById("pairLeftValue").textContent=`L-Hand: ${angles[2]}°`;
+    document.getElementById("pairRightValue").textContent=`R-Hand: ${angles[3]}°`;
+  }
+  if(send)scheduleSend(i);
+}
+function scheduleSend(i){
+  clearTimeout(sendTimers[i]);
+  sendTimers[i]=setTimeout(async()=>{
+    if(lastSent[i]===angles[i])return;
+    try{
+      const r=await fetch("/api/servo",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({servo:i+1,angle:angles[i]})});
+      const data=await r.json();
+      if(!r.ok)throw new Error(data.error||"Command failed");
+      lastSent[i]=angles[i];
+      setStatus("Arduino connected · command sent",true);
+    }catch(e){setStatus(e.message,false)}
+  },70);
+}
+function setAngle(i,a){
+  const {min,max}=servos[i];
+  angles[i]=Math.max(min,Math.min(max,Math.round(Number(a))));
+  if(i===2||i===3){
+    clearTimeout(pairTimer);
+    lastPairSent=null;
+  }
+  render(i,true);
+}
+let pairTimer=null;
+let lastPairSent=null;
+document.getElementById("pairRange").addEventListener("input",e=>{
+  const leftAngle=Number(e.target.value);
+  const rightAngle=90-leftAngle;
+  clearTimeout(sendTimers[2]);
+  clearTimeout(sendTimers[3]);
+  angles[2]=leftAngle;
+  angles[3]=rightAngle;
+  render(2,false);
+  render(3,false);
+  clearTimeout(pairTimer);
+  pairTimer=setTimeout(async()=>{
+    if(lastPairSent===leftAngle)return;
+    try{
+      const r=await fetch("/api/servo-pair",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({left_angle:leftAngle})});
+      const data=await r.json();
+      if(!r.ok)throw new Error(data.error||"Paired hand command failed");
+      lastPairSent=leftAngle;
+      lastSent[2]=leftAngle;
+      lastSent[3]=rightAngle;
+      setStatus("Arduino connected · paired command sent",true);
+    }catch(e){setStatus(e.message,false)}
+  },70);
+});
+servos.forEach((_,i)=>{
+  document.getElementById(`range${i}`).addEventListener("input",e=>setAngle(i,e.target.value));
+  const svg=document.querySelector(`[data-index="${i}"]`);
+  let dragging=false;
+  function updateFromPointer(e){
+    const pt=svg.createSVGPoint();pt.x=e.clientX;pt.y=e.clientY;
+    const p=pt.matrixTransform(svg.getScreenCTM().inverse());
+    const dx=150-p.x,dy=150-p.y;
+    // Below the arc, snap to the nearer end; setAngle applies this servo's limits.
+    const {min,max}=servos[i];
+    const a = dy<0 ? (dx>0?min:max) : Math.atan2(dy,dx)*180/Math.PI;
+    setAngle(i,a);
+  }
+  svg.addEventListener("pointerdown",e=>{dragging=true;svg.setPointerCapture(e.pointerId);updateFromPointer(e)});
+  svg.addEventListener("pointermove",e=>{if(dragging)updateFromPointer(e)});
+  svg.addEventListener("pointerup",()=>dragging=false);
+  svg.addEventListener("pointercancel",()=>dragging=false);
+  render(i,false);
+});
+document.getElementById("homeBtn").addEventListener("click",()=>angles.forEach((_,i)=>{
+  setAngle(i,servos[i].initial);
+}));
+document.getElementById("refreshBtn").addEventListener("click",checkStatus);
+function setStatus(message,online){
+  const el=document.getElementById("status");el.textContent=message;el.classList.toggle("online",online);
+}
+async function checkStatus(){
+  try{
+    const r=await fetch("/api/status");const d=await r.json();
+    if(d.connected)setStatus(`Arduino connected · ${d.port}`,true);
+    else if(d.needs_port_selection)setStatus("Multiple ports found · set SERIAL_PORT",false);
+    else setStatus(`Arduino not connected · ${d.port||"no port detected"}`,false);
+  }catch(e){setStatus("Backend not reachable · start app.py",false)}
+}
+checkStatus();
+setInterval(checkStatus,5000);
+</script>
+</body>
+</html>
